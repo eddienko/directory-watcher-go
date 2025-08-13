@@ -15,8 +15,14 @@ import (
 func main() {
 	includeDirs := flag.Bool("include-dirs", false, "Trigger command for directories too")
 	ignoreHidden := flag.Bool("ignore-hidden", false, "Ignore hidden files and directories")
+	var includePatterns multiFlag
+	var excludePatterns multiFlag
+
+	flag.Var(&includePatterns, "include", "Glob pattern to include (can be used multiple times)")
+	flag.Var(&excludePatterns, "exclude", "Glob pattern to exclude (can be used multiple times)")
+
 	flag.Usage = func() {
-		fmt.Printf("Usage: %s [--include-dirs] [--ignore-hidden] <directory_to_watch> <command> [args...]\n", filepath.Base(os.Args[0]))
+		fmt.Printf("Usage: %s [--include-dirs] [--ignore-hidden] [--include pattern] [--exclude pattern] <directory_to_watch> <command> [args...]\n", filepath.Base(os.Args[0]))
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -53,6 +59,32 @@ func main() {
 		return strings.HasPrefix(base, ".")
 	}
 
+	// Match against include/exclude patterns
+	matchesPattern := func(path string) bool {
+		rel, _ := filepath.Rel(rootDir, path) // relative to root
+		rel = filepath.ToSlash(rel)
+
+		// Exclude patterns have priority
+		for _, pat := range excludePatterns {
+			if ok, _ := filepath.Match(pat, rel); ok {
+				return false
+			}
+		}
+
+		// If includes are defined, must match at least one
+		if len(includePatterns) > 0 {
+			for _, pat := range includePatterns {
+				if ok, _ := filepath.Match(pat, rel); ok {
+					return true
+				}
+			}
+			return false
+		}
+
+		// No includes => everything allowed unless excluded
+		return true
+	}
+
 	// Add directories recursively
 	addDirRecursive := func(dir string) error {
 		return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -61,7 +93,7 @@ func main() {
 			}
 			if *ignoreHidden && isHidden(path) {
 				if info.IsDir() {
-					return filepath.SkipDir // Skip whole hidden directory
+					return filepath.SkipDir
 				}
 				return nil
 			}
@@ -94,6 +126,10 @@ func main() {
 						log.Printf("Ignoring hidden: %s", event.Name)
 						continue
 					}
+					if !matchesPattern(event.Name) {
+						log.Printf("Filtered out by patterns: %s", event.Name)
+						continue
+					}
 
 					info, err := os.Stat(event.Name)
 					if err == nil && info.IsDir() {
@@ -119,8 +155,21 @@ func main() {
 		}
 	}()
 
-	log.Printf("Recursive watching started at: %s (include dirs: %v, ignore hidden: %v)", rootDir, *includeDirs, *ignoreHidden)
+	log.Printf("Recursive watching started at: %s (include dirs: %v, ignore hidden: %v, include patterns: %v, exclude patterns: %v)",
+		rootDir, *includeDirs, *ignoreHidden, includePatterns, excludePatterns)
+
 	<-make(chan struct{}) // Block forever
+}
+
+// Helper type to accept multiple flag values
+type multiFlag []string
+
+func (m *multiFlag) String() string {
+	return strings.Join(*m, ",")
+}
+func (m *multiFlag) Set(value string) error {
+	*m = append(*m, value)
+	return nil
 }
 
 func runCommand(cmd string, args []string, newPath string) {
