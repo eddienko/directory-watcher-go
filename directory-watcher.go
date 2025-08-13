@@ -7,14 +7,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/fsnotify/fsnotify"
 )
 
 func main() {
 	includeDirs := flag.Bool("include-dirs", false, "Trigger command for directories too")
+	ignoreHidden := flag.Bool("ignore-hidden", false, "Ignore hidden files and directories")
 	flag.Usage = func() {
-		fmt.Printf("Usage: %s [--include-dirs] <directory_to_watch> <command> [args...]\n", filepath.Base(os.Args[0]))
+		fmt.Printf("Usage: %s [--include-dirs] [--ignore-hidden] <directory_to_watch> <command> [args...]\n", filepath.Base(os.Args[0]))
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -45,11 +47,23 @@ func main() {
 	}
 	defer watcher.Close()
 
+	// Check if a path is hidden
+	isHidden := func(path string) bool {
+		base := filepath.Base(path)
+		return strings.HasPrefix(base, ".")
+	}
+
 	// Add directories recursively
 	addDirRecursive := func(dir string) error {
 		return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
+			}
+			if *ignoreHidden && isHidden(path) {
+				if info.IsDir() {
+					return filepath.SkipDir // Skip whole hidden directory
+				}
+				return nil
 			}
 			if info.IsDir() {
 				err = watcher.Add(path)
@@ -76,19 +90,21 @@ func main() {
 				}
 
 				if event.Op&fsnotify.Create == fsnotify.Create {
+					if *ignoreHidden && isHidden(event.Name) {
+						log.Printf("Ignoring hidden: %s", event.Name)
+						continue
+					}
+
 					info, err := os.Stat(event.Name)
 					if err == nil && info.IsDir() {
-						// Watch new directories
 						log.Printf("New directory detected: %s", event.Name)
 						if err := addDirRecursive(event.Name); err != nil {
 							log.Printf("Error watching new directory: %v", err)
 						}
-						// Run command if option is enabled
 						if *includeDirs {
 							runCommand(cmd, cmdArgs, event.Name)
 						}
 					} else {
-						// Always run for files
 						log.Printf("New file detected: %s", event.Name)
 						runCommand(cmd, cmdArgs, event.Name)
 					}
@@ -103,7 +119,7 @@ func main() {
 		}
 	}()
 
-	log.Printf("Recursive watching started at: %s (include dirs: %v)", rootDir, *includeDirs)
+	log.Printf("Recursive watching started at: %s (include dirs: %v, ignore hidden: %v)", rootDir, *includeDirs, *ignoreHidden)
 	<-make(chan struct{}) // Block forever
 }
 
